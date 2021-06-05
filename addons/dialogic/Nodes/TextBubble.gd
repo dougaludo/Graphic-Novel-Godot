@@ -5,10 +5,10 @@ var text_speed := 0.02 # Higher = lower speed
 
 onready var text_label = $RichTextLabel
 onready var name_label = $NameLabel
-onready var tween = $Tween
 onready var next_indicator = $NextIndicatorContainer/NextIndicator
 
 var _finished := false
+var _theme
 
 signal text_completed()
 
@@ -26,6 +26,8 @@ func update_name(name: String, color: Color = Color.white, autocolor: bool=false
 		name_label.rect_size = Vector2(-1, 40)
 		# Setting the color and text
 		name_label.text = name
+		# Alignment
+		call_deferred('align_name_label')
 		if autocolor:
 			name_label.set('custom_colors/font_color', color)
 	else:
@@ -33,13 +35,15 @@ func update_name(name: String, color: Color = Color.white, autocolor: bool=false
 
 
 func update_text(text):
+	# Removing commands from the text
+	#text = text.replace('[p]', '')
+	text = text.replace('[nw]', '')
+	
 	# Updating the text and starting the animation from 0
 	text_label.bbcode_text = text
-	text_label.percent_visible = 0
-
-	# The call to this function needs to be deferred.
-	# More info: https://github.com/godotengine/godot/issues/36381
-	call_deferred("_start_text_tween")
+	text_label.visible_characters = 0
+	
+	start_text_timer()
 	return true
 
 
@@ -48,8 +52,10 @@ func is_finished():
 
 
 func skip():
-	tween.seek(999)
-	_on_Tween_tween_completed(null, null)
+	$WritingTimer.stop()
+	$RichTextLabel.visible_characters = -1
+	_finished = true
+	emit_signal("text_completed")
 
 
 func reset():
@@ -61,8 +67,11 @@ func load_theme(theme: ConfigFile):
 	# Text
 	var theme_font = DialogicUtil.path_fixer_load(theme.get_value('text', 'font', 'res://addons/dialogic/Example Assets/Fonts/DefaultFont.tres'))
 	text_label.set('custom_fonts/normal_font', theme_font)
-	name_label.set('custom_fonts/font', theme_font)
-
+	text_label.set('custom_fonts/bold_font', DialogicUtil.path_fixer_load(theme.get_value('text', 'bold_font', 'res://addons/dialogic/Example Assets/Fonts/DefaultBoldFont.tres')))
+	text_label.set('custom_fonts/italics_font', DialogicUtil.path_fixer_load(theme.get_value('text', 'italic_font', 'res://addons/dialogic/Example Assets/Fonts/DefaultItalicFont.tres')))
+	name_label.set('custom_fonts/font', DialogicUtil.path_fixer_load(theme.get_value('name', 'font', 'res://addons/dialogic/Example Assets/Fonts/NameFont.tres')))
+	
+	
 	var text_color = Color(theme.get_value('text', 'color', '#ffffffff'))
 	text_label.set('custom_colors/default_color', text_color)
 	name_label.set('custom_colors/font_color', text_color)
@@ -93,7 +102,7 @@ func load_theme(theme: ConfigFile):
 	$TextureRect.texture = DialogicUtil.path_fixer_load(theme.get_value('background','image', "res://addons/dialogic/Example Assets/backgrounds/background-2.png"))
 	$ColorRect.color = Color(theme.get_value('background','color', "#ff000000"))
 
-	if theme.get_value('background', 'modulation', false) == true:
+	if theme.get_value('background', 'modulation', false):
 		$TextureRect.modulate = Color(theme.get_value('background', 'modulation_color', '#ffffffff'))
 	else:
 		$TextureRect.modulate = Color('#ffffffff')
@@ -122,21 +131,32 @@ func load_theme(theme: ConfigFile):
 	$NameLabel/ColorRect.color = Color(theme.get_value('name', 'background', '#282828'))
 	$NameLabel/TextureRect.visible = theme.get_value('name', 'image_visible', false)
 	$NameLabel/TextureRect.texture = DialogicUtil.path_fixer_load(theme.get_value('name','image', "res://addons/dialogic/Example Assets/backgrounds/background-2.png"))
+	
+	var name_padding = theme.get_value('name', 'name_padding', Vector2( 10, 0 ))
+	var name_style = name_label.get('custom_styles/normal')
+	name_style.set('content_margin_left', name_padding.x)
+	name_style.set('content_margin_right', name_padding.x)
+	name_style.set('content_margin_bottom', name_padding.y)
+	
 	var name_shadow_offset = theme.get_value('name', 'shadow_offset', Vector2(2,2))
 	if theme.get_value('name', 'shadow_visible', true):
 		name_label.set('custom_colors/font_color_shadow', Color(theme.get_value('name', 'shadow', '#9e000000')))
 		name_label.set('custom_constants/shadow_offset_x', name_shadow_offset.x)
 		name_label.set('custom_constants/shadow_offset_y', name_shadow_offset.y)
-	name_label.rect_position.y = theme.get_value('name', 'bottom_gap', 48) * -1
+	name_label.rect_position.y = theme.get_value('name', 'bottom_gap', 48) * -1 - (name_padding.y)
 	if theme.get_value('name', 'modulation', false) == true:
 		$NameLabel/TextureRect.modulate = Color(theme.get_value('name', 'modulation_color', '#ffffffff'))
 	else:
 		$NameLabel/TextureRect.modulate = Color('#ffffffff')
 	
+	
 	# Setting next indicator animation
 	next_indicator.self_modulate = Color('#ffffff')
 	var animation = theme.get_value('next_indicator', 'animation', 'Up and down')
 	next_indicator.get_node('AnimationPlayer').play(animation)
+	
+	# Saving reference to the current theme
+	_theme = theme
 
 
 ## *****************************************************************************
@@ -144,21 +164,38 @@ func load_theme(theme: ConfigFile):
 ## *****************************************************************************
 
 
-func _on_Tween_tween_completed(object, key):
-	_finished = true
-	emit_signal("text_completed")
+func _on_writing_timer_timeout():
+	$RichTextLabel.visible_characters += 1
 
 
-func _start_text_tween():
-	# This will start the animation that makes the text appear letter by letter
-	var tween_duration = text_speed * text_label.get_total_character_count()
-	tween.interpolate_property(
-		text_label, "percent_visible", 0, 1, tween_duration,
-		Tween.TRANS_LINEAR, Tween.EASE_IN_OUT
-	)
-	_finished = false
-	tween.start()
+func _process(_delta):
+	if _finished == false:
+		if $RichTextLabel.visible_characters >= $RichTextLabel.get_total_character_count():
+			_finished = true
+			emit_signal("text_completed")
 
+
+func start_text_timer():
+	if text_speed == 0:
+		_finished = true
+		$RichTextLabel.visible_characters = -1
+		emit_signal("text_completed")
+	else:
+		$WritingTimer.start(text_speed)
+		_finished = false
+
+
+func align_name_label():
+	var name_padding = _theme.get_value('name', 'name_padding', Vector2( 10, 0 ))
+	var horizontal_offset = _theme.get_value('name', 'horizontal_offset', 0)
+	var name_label_position = _theme.get_value('name', 'position', 0)
+	var label_size = name_label.rect_size.x
+	if name_label_position == 0:
+		name_label.rect_global_position.x = rect_global_position.x + horizontal_offset
+	elif name_label_position == 1: # Center
+		name_label.rect_global_position.x = rect_global_position.x + (rect_size.x / 2) - (label_size / 2) + horizontal_offset
+	elif name_label_position == 2: # Right
+		name_label.rect_global_position.x = rect_global_position.x + rect_size.x - label_size + horizontal_offset
 
 ## *****************************************************************************
 ##								OVERRIDES
@@ -167,5 +204,5 @@ func _start_text_tween():
 
 func _ready():
 	reset()
-	tween.connect("tween_completed", self, '_on_Tween_tween_completed')
+	$WritingTimer.connect("timeout", self, "_on_writing_timer_timeout")
 	text_label.meta_underlined = false
